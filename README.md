@@ -79,7 +79,9 @@ These steps keep the local `pdftomd.sh` customizations intact while pulling upst
 - If a run is interrupted, stale marker processes may hold GPU memory. Check with `nvidia-smi`.
 - If Marker reports conversion errors (e.g., CUDA OOM), the script exits non-zero even if marker itself returns 0.
 
-# Appendix: Marker
+# Appendix: About Marker
+
+see https://github.com/datalab-to/marker
 
 Marker converts documents to markdown, JSON, and HTML quickly and accurately.
 
