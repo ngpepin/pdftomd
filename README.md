@@ -7,6 +7,7 @@
 - Splits large PDFs into chunks and runs Marker once on the chunk folder (avoids repeated model loads).
 - Consolidates all chunk markdown into a single `.md` file.
 - Optionally embeds images as Base64 (no external asset folders needed).
+- Optional OCR pass via `ocr-pdf.sh` before conversion.
 - Automatically uses GPU when available and installs CUDA-enabled torch when needed.
 - Cleans up intermediate files and attempts to stop spawned processes on exit.
 
@@ -22,6 +23,7 @@ This produces `file.md` in the current directory. If you are not embedding image
 
 - `-e, --embed`: Embed images as Base64 in the output markdown.
 - `-v, --verbose`: Show verbose output.
+- `-o, --ocr`: Run OCR via `ocr-pdf.sh` before conversion (produces `<filename>_OCR.md`).
 - `-c, --cpu`: Force CPU processing (ignore GPU even if present).
 - `-w, --workers N`: Number of worker processes for marker (default is 2).
 - `-h, --help`: Show usage.
@@ -29,6 +31,7 @@ This produces `file.md` in the current directory. If you are not embedding image
 ## Output behavior
 
 - Output is moved to the directory where the script is run.
+- When `-o/--ocr` is used, the OCR pass writes `<filename>_OCR.pdf` in the current directory and the final markdown is named `<filename>_OCR.md`.
 - When images are not embedded, the script creates an archive (`*_bundle.tar.xz`) with attachment directories and prints a reminder to extract it.
 - At the end, the script prints total conversion time (HH:MM:SS) and time per page (seconds, 2 decimals).
 
@@ -36,6 +39,7 @@ This produces `file.md` in the current directory. If you are not embedding image
 
 - `qpdf` and `pxz`
 - Marker installed in the configured `MARKER_DIRECTORY` with an active venv
+- `ocr-pdf.sh` from the `OCR_PDF` repository (required for `-o/--ocr`)
 - NVIDIA driver installed if you want GPU (torch will be auto-installed in the venv)
 
 ## Updating Marker without breaking `pdftomd.sh`

@@ -25,6 +25,7 @@ set -eE -o pipefail
 # Options:
 #  -e, --embed       Embed images as Base64 in the output markdown
 #  -v, --verbose     Show verbose output
+#  -o, --ocr         Run OCR via ocr-pdf.sh before conversion
 #  -c, --cpu         Force CPU processing (ignore GPU even if present)
 #  -w, --workers N   Number of worker processes for marker
 #  -h, --help        Show this help message
@@ -35,7 +36,7 @@ set -eE -o pipefail
 #
 # Dependencies:
 #
-#  qpdf, pxz, marker (python instalation)
+#  qpdf, pxz, marker (python instalation), ocr-pdf.sh (OCR_PDF repo for -o/--ocr)
 #
 #
 #  Initial ersions: CPU-only
@@ -54,6 +55,9 @@ MARKER_RESULTS+="site-packages/conversion_results"
 MARKER_WORKERS=2                                               # Worker processes for marker CLI
 CONVERT_BASE64=false # Set to true to convert image links in the markdown files to Base64-encoded images
 FORCE_CPU=false
+USE_OCR=false
+OCR_SCRIPT="/home/npepin/Projects/OCR_PDF/ocr-pdf.sh"
+OCR_OPTIONS="-aq" # Options to pass to the OCR script - autorotate and quiet
 # DO NOT MODIFY BELOW THIS LINE
 # ----------------------------------------------
 
@@ -64,6 +68,7 @@ Usage: pdftomd.sh [options] <pdf_file>
 Options:
   -e, --embed       Embed images as Base64 in the output markdown
   -v, --verbose     Show verbose output
+  -o, --ocr         Run OCR via ocr-pdf.sh before conversion
   -c, --cpu         Force CPU processing (ignore GPU even if present)
   -w, --workers N   Number of worker processes for marker
   -h, --help        Show this help message
@@ -82,6 +87,10 @@ while [[ $# -gt 0 ]]; do
         ;;
     -v | --verbose)
         VERBOSE=true
+        shift
+        ;;
+    -o | --ocr)
+        USE_OCR=true
         shift
         ;;
     -c | --cpu)
@@ -107,6 +116,9 @@ while [[ $# -gt 0 ]]; do
                 ;;
             v)
                 VERBOSE=true
+                ;;
+            o)
+                USE_OCR=true
                 ;;
             c)
                 FORCE_CPU=true
@@ -172,8 +184,6 @@ if [ ! -f "$source_pdf" ]; then
 fi
 
 start_time=$(date +%s)
-echo "Converting PDF: $(basename "$source_pdf")"
-
 if [ "$VERBOSE" = true ]; then
     DEBUG=true
     SHOW_MARKER_OUTPUT=true
@@ -181,6 +191,29 @@ else
     DEBUG=false
     SHOW_MARKER_OUTPUT=false
 fi
+
+if [ "$USE_OCR" = true ]; then
+    echo "Running OCR on $(basename "$source_pdf")"
+    if [ ! -x "$OCR_SCRIPT" ]; then
+        echo "Error: OCR script not found or not executable: $OCR_SCRIPT" >&2
+        exit 1
+    fi
+    source_base="$(basename "$source_pdf")"
+    source_base_no_ext="${source_base%.*}"
+    ocr_output_pdf="$start_directory/${source_base_no_ext}_OCR.pdf"
+    if [ "$VERBOSE" = true ]; then
+        (cd "$start_directory" && "$OCR_SCRIPT" $OCR_OPTIONS "$source_pdf")
+    else
+        (cd "$start_directory" && "$OCR_SCRIPT" "$source_pdf" >/dev/null 2>&1)
+    fi
+    if [ ! -f "$ocr_output_pdf" ]; then
+        echo "Error: OCR output not found: $ocr_output_pdf" >&2
+        exit 1
+    fi
+    source_pdf=$(realpath "$ocr_output_pdf")
+fi
+
+echo "Converting PDF: $(basename "$source_pdf")"
 
 ext=".pdf"
 extmd=".md"
