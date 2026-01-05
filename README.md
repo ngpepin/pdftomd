@@ -8,6 +8,7 @@
 - Consolidates all chunk markdown into a single `.md` file.
 - Optionally embeds images as Base64 (no external asset folders needed).
 - Optional OCR pass via `ocr-pdf.sh` before conversion.
+- Optional LLM helper via Marker `--use_llm`.
 - Automatically uses GPU when available and installs CUDA-enabled torch when needed.
 - Cleans up intermediate files and attempts to stop spawned processes on exit.
 
@@ -24,8 +25,9 @@ This produces `file.md` in the current directory. If you are not embedding image
 - `-e, --embed`: Embed images as Base64 in the output markdown.
 - `-v, --verbose`: Show verbose output.
 - `-o, --ocr`: Run OCR via `ocr-pdf.sh` before conversion (produces `<filename>_OCR.md`).
+- `-l, --llm`: Enable Marker LLM helper (`--use_llm`). Configure credentials per Marker (e.g., `GOOGLE_API_KEY`) and optionally set `LLM_SERVICE` in `pdftomd.conf`. For OpenAI-compatible endpoints set `LLM_SERVICE=marker.services.openai.OpenAIService` and supply `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL`.
 - `-c, --cpu`: Force CPU processing (ignore GPU even if present).
-- `-w, --workers N`: Number of worker processes for marker (default is 2).
+- `-w, --workers N`: Number of worker processes for marker (default is 1).
 - `-h, --help`: Show usage.
 
 ## Output behavior

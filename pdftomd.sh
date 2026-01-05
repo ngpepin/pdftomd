@@ -26,6 +26,7 @@ set -eE -o pipefail
 #  -e, --embed       Embed images as Base64 in the output markdown
 #  -v, --verbose     Show verbose output
 #  -o, --ocr         Run OCR via ocr-pdf.sh before conversion
+#  -l, --llm         Enable Marker LLM helper (--use_llm)
 #  -c, --cpu         Force CPU processing (ignore GPU even if present)
 #  -w, --workers N   Number of worker processes for marker
 #  -h, --help        Show this help message
@@ -52,23 +53,38 @@ MARKER_DIRECTORY="/home/npepin/Projects/marker"                 # Change this to
 MARKER_VENV="venv"                                              # Name of the virtual environment directory in the marker directory
 MARKER_RESULTS="$MARKER_DIRECTORY/$MARKER_VENV/lib/python3.10/" # Directory where marker results are stored
 MARKER_RESULTS+="site-packages/conversion_results"
-MARKER_WORKERS=2                                               # Worker processes for marker CLI
+MARKER_WORKERS=1     # Worker processes for marker CLI
 CONVERT_BASE64=false # Set to true to convert image links in the markdown files to Base64-encoded images
 FORCE_CPU=false
 USE_OCR=false
 OCR_SCRIPT="/home/npepin/Projects/OCR_PDF/ocr-pdf.sh"
-OCR_OPTIONS="-aq" # Options to pass to the OCR script 
+OCR_OPTIONS="-aq" # Options to pass to the OCR script
+USE_LLM=false
+LLM_SERVICE=""
+
+# source the configuration file if it exists
+CONFIG_FILE="$(dirname "$0")/pdftomd.conf"
+if [ -f "$CONFIG_FILE" ]; then
+	# shellcheck source=/dev/null
+	source "$CONFIG_FILE"
+else
+	OPENAI_API_KEY="..."
+	OPENAI_MODEL="gpt-4.1"
+	OPENAI_BASE_URL="https://api.openai.com/v1"
+fi
 # DO NOT MODIFY BELOW THIS LINE
 # ----------------------------------------------
 
 print_usage() {
-    cat <<EOF
+	cat <<EOF
 Usage: pdftomd.sh [options] <pdf_file>
 
 Options:
   -e, --embed       Embed images as Base64 in the output markdown
   -v, --verbose     Show verbose output
-  -o, --ocr         Run OCR via ocr-pdf.sh before conversion
+  -o, --ocr         Run OCR via an external EasyOCR script before conversion
+                    (Note that Marker will perform OCR on images if needed)
+  -l, --llm         Enable Marker LLM helper (--use_llm)
   -c, --cpu         Force CPU processing (ignore GPU even if present)
   -w, --workers N   Number of worker processes for marker
   -h, --help        Show this help message
@@ -80,137 +96,150 @@ EOF
 
 source_pdf=""
 while [[ $# -gt 0 ]]; do
-    case "$1" in
-    -e | --embed)
-        CONVERT_BASE64=true
-        shift
-        ;;
-    -v | --verbose)
-        VERBOSE=true
-        shift
-        ;;
-    -o | --ocr)
-        USE_OCR=true
-        shift
-        ;;
-    -c | --cpu)
-        FORCE_CPU=true
-        shift
-        ;;
-    -w | --workers)
-        if [ -z "${2:-}" ] || [[ "$2" == -* ]]; then
-            echo "Error: --workers requires a numeric value."
-            exit 1
-        fi
-        MARKER_WORKERS="$2"
-        shift 2
-        ;;
-    -[a-zA-Z][a-zA-Z]*)
-        short_flags="${1#-}"
-        shift
-        for ((i = 0; i < ${#short_flags}; i++)); do
-            flag_char="${short_flags:i:1}"
-            case "$flag_char" in
-            e)
-                CONVERT_BASE64=true
-                ;;
-            v)
-                VERBOSE=true
-                ;;
-            o)
-                USE_OCR=true
-                ;;
-            c)
-                FORCE_CPU=true
-                ;;
-            w)
-                echo "Error: -w requires a numeric value (use -w 2)."
-                exit 1
-                ;;
-            h)
-                print_usage
-                exit 0
-                ;;
-            *)
-                echo "Error: Unknown option '-$flag_char'"
-                print_usage
-                exit 1
-                ;;
-            esac
-        done
-        ;;
-    -h | --help)
-        print_usage
-        exit 0
-        ;;
-    --)
-        shift
-        break
-        ;;
-    -*)
-        echo "Error: Unknown option '$1'"
-        print_usage
-        exit 1
-        ;;
-    *)
-        if [ -z "$source_pdf" ]; then
-            source_pdf="$1"
-        else
-            echo "Error: Unexpected argument '$1'"
-            print_usage
-            exit 1
-        fi
-        shift
-        ;;
-    esac
+	case "$1" in
+	-e | --embed)
+		CONVERT_BASE64=true
+		shift
+		;;
+	-v | --verbose)
+		VERBOSE=true
+		shift
+		;;
+	-o | --ocr)
+		USE_OCR=true
+		shift
+		;;
+	-l | --llm)
+		USE_LLM=true
+		shift
+		;;
+	-c | --cpu)
+		FORCE_CPU=true
+		shift
+		;;
+	-w | --workers)
+		if [ -z "${2:-}" ] || [[ "$2" == -* ]]; then
+			echo "Error: --workers requires a numeric value."
+			exit 1
+		fi
+		MARKER_WORKERS="$2"
+		shift 2
+		;;
+	-[a-zA-Z][a-zA-Z]*)
+		short_flags="${1#-}"
+		shift
+		for ((i = 0; i < ${#short_flags}; i++)); do
+			flag_char="${short_flags:i:1}"
+			case "$flag_char" in
+			e)
+				CONVERT_BASE64=true
+				;;
+			v)
+				VERBOSE=true
+				;;
+			o)
+				USE_OCR=true
+				;;
+			l)
+				USE_LLM=true
+				;;
+			c)
+				FORCE_CPU=true
+				;;
+			w)
+				echo "Error: -w requires a numeric value (use -w 2)."
+				exit 1
+				;;
+			h)
+				print_usage
+				exit 0
+				;;
+			*)
+				echo "Error: Unknown option '-$flag_char'"
+				print_usage
+				exit 1
+				;;
+			esac
+		done
+		;;
+	-h | --help)
+		print_usage
+		exit 0
+		;;
+	--)
+		shift
+		break
+		;;
+	-*)
+		echo "Error: Unknown option '$1'"
+		print_usage
+		exit 1
+		;;
+	*)
+		if [ -z "$source_pdf" ]; then
+			source_pdf="$1"
+		else
+			echo "Error: Unexpected argument '$1'"
+			print_usage
+			exit 1
+		fi
+		shift
+		;;
+	esac
 done
 
 if [ -z "$source_pdf" ]; then
-    print_usage
-    exit 1
+	print_usage
+	exit 1
 fi
 
 if ! [[ "$MARKER_WORKERS" =~ ^[0-9]+$ ]] || [ "$MARKER_WORKERS" -lt 1 ]; then
-    echo "Error: --workers must be a positive integer."
-    exit 1
+	echo "Error: --workers must be a positive integer."
+	exit 1
 fi
 
 start_directory=$(pwd)
 source_pdf=$(realpath "$source_pdf")
 
 if [ ! -f "$source_pdf" ]; then
-    echo "Error: PDF file not found: $source_pdf"
-    exit 1
+	echo "Error: PDF file not found: $source_pdf"
+	exit 1
 fi
 
 start_time=$(date +%s)
 if [ "$VERBOSE" = true ]; then
-    DEBUG=true
-    SHOW_MARKER_OUTPUT=true
+	DEBUG=true
+	SHOW_MARKER_OUTPUT=true
 else
-    DEBUG=false
-    SHOW_MARKER_OUTPUT=false
+	DEBUG=false
+	SHOW_MARKER_OUTPUT=false
 fi
 
 if [ "$USE_OCR" = true ]; then
-    echo "Running OCR on $(basename "$source_pdf")"
-    if [ ! -x "$OCR_SCRIPT" ]; then
-        echo "Error: OCR script not found or not executable: $OCR_SCRIPT" >&2
-        exit 1
-    fi
-    source_base="$(basename "$source_pdf")"
-    source_base_no_ext="${source_base%.*}"
-    ocr_output_pdf="$start_directory/${source_base_no_ext}_OCR.pdf"
-    if [ "$VERBOSE" = true ]; then
-        (cd "$start_directory" && eval "$OCR_SCRIPT $OCR_OPTIONS $source_pdf")
-    else
-        (cd "$start_directory" && eval "$OCR_SCRIPT $OCR_OPTIONS $source_pdf" >/dev/null 2>&1)
-    fi
-    if [ ! -f "$ocr_output_pdf" ]; then
-        echo "Error: OCR output not found: $ocr_output_pdf" >&2
-        exit 1
-    fi
-    source_pdf=$(realpath "$ocr_output_pdf")
+	echo "Running OCR on $(basename "$source_pdf")"
+	if [ ! -x "$OCR_SCRIPT" ]; then
+		echo "Error: OCR script not found or not executable: $OCR_SCRIPT" >&2
+		exit 1
+	fi
+	source_base="$(basename "$source_pdf")"
+	source_base_no_ext="${source_base%.*}"
+	ocr_output_pdf="$start_directory/${source_base_no_ext}_OCR.pdf"
+	if [ "$VERBOSE" = true ]; then
+		(cd "$start_directory" && eval "$OCR_SCRIPT $OCR_OPTIONS $source_pdf")
+	else
+		(cd "$start_directory" && eval "$OCR_SCRIPT $OCR_OPTIONS $source_pdf" >/dev/null 2>&1)
+	fi
+	if [ ! -f "$ocr_output_pdf" ]; then
+		echo "Error: OCR output not found: $ocr_output_pdf" >&2
+		exit 1
+	fi
+	source_pdf=$(realpath "$ocr_output_pdf")
+fi
+
+if [ "$USE_LLM" = true ] && [ -z "$LLM_SERVICE" ]; then
+	if [ -n "$OPENAI_API_KEY" ] && [ "$OPENAI_API_KEY" != "..." ]; then
+		LLM_SERVICE="marker.services.openai.OpenAIService"
+	fi
 fi
 
 echo "Converting PDF: $(basename "$source_pdf")"
@@ -237,116 +266,116 @@ marker_log=""
 # ----------------------------------------------
 
 log() {
-    if [ "$VERBOSE" = true ]; then
-        echo "$@"
-    fi
+	if [ "$VERBOSE" = true ]; then
+		echo "$@"
+	fi
 }
 
 format_duration() {
-    local total_seconds="$1"
-    local hours=$((total_seconds / 3600))
-    local minutes=$(((total_seconds % 3600) / 60))
-    local seconds=$((total_seconds % 60))
-    printf "%02d:%02d:%02d" "$hours" "$minutes" "$seconds"
+	local total_seconds="$1"
+	local hours=$((total_seconds / 3600))
+	local minutes=$(((total_seconds % 3600) / 60))
+	local seconds=$((total_seconds % 60))
+	printf "%02d:%02d:%02d" "$hours" "$minutes" "$seconds"
 }
 
 on_error() {
-    local exit_code=$?
-    local line_no="$1"
-    echo "Error: command failed at line $line_no (exit code $exit_code)." >&2
-    cleanup_temp
-    exit "$exit_code"
+	local exit_code=$?
+	local line_no="$1"
+	echo "Error: command failed at line $line_no (exit code $exit_code)." >&2
+	cleanup_temp
+	exit "$exit_code"
 }
 
 cleanup_temp() {
-    # Ensure marker subprocesses are stopped before removing temp directories.
-    if [ -n "$marker_pid" ] && kill -0 "$marker_pid" 2>/dev/null; then
-        log "Stopping marker process $marker_pid"
-        pkill -TERM -P "$marker_pid" >/dev/null 2>&1 || true
-        kill "$marker_pid" >/dev/null 2>&1 || true
-        sleep 2
-        pkill -KILL -P "$marker_pid" >/dev/null 2>&1 || true
-        kill -9 "$marker_pid" >/dev/null 2>&1 || true
-    fi
+	# Ensure marker subprocesses are stopped before removing temp directories.
+	if [ -n "$marker_pid" ] && kill -0 "$marker_pid" 2>/dev/null; then
+		log "Stopping marker process $marker_pid"
+		pkill -TERM -P "$marker_pid" >/dev/null 2>&1 || true
+		kill "$marker_pid" >/dev/null 2>&1 || true
+		sleep 2
+		pkill -KILL -P "$marker_pid" >/dev/null 2>&1 || true
+		kill -9 "$marker_pid" >/dev/null 2>&1 || true
+	fi
 
-    if [ -n "$chunk_dir" ] && command -v pgrep >/dev/null 2>&1; then
-        marker_pids=$(pgrep -f "marker .*${chunk_dir}")
-        if [ -n "$marker_pids" ]; then
-            log "Stopping marker processes for $chunk_dir"
-            kill $marker_pids >/dev/null 2>&1 || true
-            sleep 2
-            kill -9 $marker_pids >/dev/null 2>&1 || true
-        fi
-    fi
+	if [ -n "$chunk_dir" ] && command -v pgrep >/dev/null 2>&1; then
+		marker_pids=$(pgrep -f "marker .*${chunk_dir}")
+		if [ -n "$marker_pids" ]; then
+			log "Stopping marker processes for $chunk_dir"
+			kill $marker_pids >/dev/null 2>&1 || true
+			sleep 2
+			kill -9 $marker_pids >/dev/null 2>&1 || true
+		fi
+	fi
 
-    if [ -n "$chunk_dir" ] && [ -d "$chunk_dir" ]; then
-        rm -rf "$chunk_dir"
-    fi
-    if [ -n "$temp_merge_dir" ] && [ -d "$temp_merge_dir" ]; then
-        rm -rf "$temp_merge_dir"
-    fi
-    if [ -n "$marker_log" ] && [ -f "$marker_log" ]; then
-        rm -f "$marker_log"
-    fi
+	if [ -n "$chunk_dir" ] && [ -d "$chunk_dir" ]; then
+		rm -rf "$chunk_dir"
+	fi
+	if [ -n "$temp_merge_dir" ] && [ -d "$temp_merge_dir" ]; then
+		rm -rf "$temp_merge_dir"
+	fi
+	if [ -n "$marker_log" ] && [ -f "$marker_log" ]; then
+		rm -f "$marker_log"
+	fi
 }
 
 trap 'on_error $LINENO' ERR
 trap cleanup_temp INT TERM EXIT
 
 run_quiet() {
-    if [ "$VERBOSE" = true ]; then
-        "$@"
-    else
-        "$@" >/dev/null 2>&1
-    fi
+	if [ "$VERBOSE" = true ]; then
+		"$@"
+	else
+		"$@" >/dev/null 2>&1
+	fi
 }
 
 ensure_dependency() {
-    local command_name="$1"
-    local package_name="$2"
-    local sudo_cmd=""
+	local command_name="$1"
+	local package_name="$2"
+	local sudo_cmd=""
 
-    if command -v "$command_name" >/dev/null 2>&1; then
-        return 0
-    fi
+	if command -v "$command_name" >/dev/null 2>&1; then
+		return 0
+	fi
 
-    if ! command -v apt-get >/dev/null 2>&1; then
-        echo "Error: apt-get not available to install '$package_name'." >&2
-        exit 1
-    fi
+	if ! command -v apt-get >/dev/null 2>&1; then
+		echo "Error: apt-get not available to install '$package_name'." >&2
+		exit 1
+	fi
 
-    if command -v sudo >/dev/null 2>&1; then
-        sudo_cmd="sudo"
-    fi
+	if command -v sudo >/dev/null 2>&1; then
+		sudo_cmd="sudo"
+	fi
 
-    log "Installing missing dependency: $package_name"
-    run_quiet $sudo_cmd apt-get update
-    if ! run_quiet $sudo_cmd apt-get install -y "$package_name"; then
-        echo "Error: Failed to install dependency '$package_name'." >&2
-        exit 1
-    fi
+	log "Installing missing dependency: $package_name"
+	run_quiet $sudo_cmd apt-get update
+	if ! run_quiet $sudo_cmd apt-get install -y "$package_name"; then
+		echo "Error: Failed to install dependency '$package_name'." >&2
+		exit 1
+	fi
 }
 
 has_nvidia_gpu() {
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        if nvidia-smi -L >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
+	if command -v nvidia-smi >/dev/null 2>&1; then
+		if nvidia-smi -L >/dev/null 2>&1; then
+			return 0
+		fi
+	fi
 
-    if [ -e /proc/driver/nvidia/version ] || [ -e /dev/nvidia0 ]; then
-        return 0
-    fi
+	if [ -e /proc/driver/nvidia/version ] || [ -e /dev/nvidia0 ]; then
+		return 0
+	fi
 
-    return 1
+	return 1
 }
 
 get_cuda_version_from_nvidia_smi() {
-    if ! command -v nvidia-smi >/dev/null 2>&1; then
-        return 1
-    fi
+	if ! command -v nvidia-smi >/dev/null 2>&1; then
+		return 1
+	fi
 
-    nvidia-smi 2>/dev/null | awk -F 'CUDA Version: ' '
+	nvidia-smi 2>/dev/null | awk -F 'CUDA Version: ' '
         /CUDA Version/ {
             split($2, a, " ")
             print a[1]
@@ -356,24 +385,24 @@ get_cuda_version_from_nvidia_smi() {
 }
 
 map_cuda_version_to_torch_tag() {
-    local cuda_version="$1"
-    local major="${cuda_version%%.*}"
+	local cuda_version="$1"
+	local major="${cuda_version%%.*}"
 
-    if [ "$major" -ge 12 ]; then
-        echo "cu121"
-        return 0
-    fi
+	if [ "$major" -ge 12 ]; then
+		echo "cu121"
+		return 0
+	fi
 
-    if [ "$major" -eq 11 ]; then
-        echo "cu118"
-        return 0
-    fi
+	if [ "$major" -eq 11 ]; then
+		echo "cu118"
+		return 0
+	fi
 
-    echo ""
+	echo ""
 }
 
 torch_cuda_available() {
-    python3 <<'PY' >/dev/null 2>&1
+	python3 <<'PY' >/dev/null 2>&1
 import sys
 try:
     import torch
@@ -384,95 +413,102 @@ PY
 }
 
 install_gpu_torch_if_needed() {
-    local cuda_version=""
-    local torch_cuda_tag=""
+	local cuda_version=""
+	local torch_cuda_tag=""
 
-    # Auto-install CUDA-enabled torch when a GPU is available unless CPU is forced.
-    if [ "$FORCE_CPU" = true ]; then
-        log "CPU mode enabled; skipping CUDA-enabled torch install."
-        return 0
-    fi
+	# Auto-install CUDA-enabled torch when a GPU is available unless CPU is forced.
+	if [ "$FORCE_CPU" = true ]; then
+		log "CPU mode enabled; skipping CUDA-enabled torch install."
+		return 0
+	fi
 
-    if ! has_nvidia_gpu; then
-        log "No NVIDIA GPU detected; skipping CUDA-enabled torch install."
-        return 0
-    fi
+	if ! has_nvidia_gpu; then
+		log "No NVIDIA GPU detected; skipping CUDA-enabled torch install."
+		return 0
+	fi
 
-    if torch_cuda_available; then
-        log "CUDA-enabled torch already available."
-        return 0
-    fi
+	if torch_cuda_available; then
+		log "CUDA-enabled torch already available."
+		return 0
+	fi
 
-    cuda_version="$(get_cuda_version_from_nvidia_smi)"
-    if [ -z "$cuda_version" ]; then
-        log "Unable to determine CUDA version via nvidia-smi; skipping torch install."
-        return 0
-    fi
+	cuda_version="$(get_cuda_version_from_nvidia_smi)"
+	if [ -z "$cuda_version" ]; then
+		log "Unable to determine CUDA version via nvidia-smi; skipping torch install."
+		return 0
+	fi
 
-    torch_cuda_tag="$(map_cuda_version_to_torch_tag "$cuda_version")"
-    if [ -z "$torch_cuda_tag" ]; then
-        log "Unsupported CUDA version '$cuda_version'; skipping torch install."
-        return 0
-    fi
+	torch_cuda_tag="$(map_cuda_version_to_torch_tag "$cuda_version")"
+	if [ -z "$torch_cuda_tag" ]; then
+		log "Unsupported CUDA version '$cuda_version'; skipping torch install."
+		return 0
+	fi
 
-    log "Installing CUDA-enabled torch ($torch_cuda_tag) based on CUDA $cuda_version."
-    if ! run_quiet python3 -m pip install --upgrade --force-reinstall --no-cache-dir torch --index-url "https://download.pytorch.org/whl/$torch_cuda_tag"; then
-        echo "Error: Failed to install CUDA-enabled torch ($torch_cuda_tag)." >&2
-        exit 1
-    fi
+	log "Installing CUDA-enabled torch ($torch_cuda_tag) based on CUDA $cuda_version."
+	if ! run_quiet python3 -m pip install --upgrade --force-reinstall --no-cache-dir torch --index-url "https://download.pytorch.org/whl/$torch_cuda_tag"; then
+		echo "Error: Failed to install CUDA-enabled torch ($torch_cuda_tag)." >&2
+		exit 1
+	fi
 
-    if ! torch_cuda_available; then
-        echo "Error: CUDA-enabled torch install completed, but torch.cuda.is_available() is still false." >&2
-        exit 1
-    fi
+	if ! torch_cuda_available; then
+		echo "Error: CUDA-enabled torch install completed, but torch.cuda.is_available() is still false." >&2
+		exit 1
+	fi
 }
 
 configure_torch_device() {
-    local cuda_available=false
+	local cuda_available=false
 
-    # Honor CPU override even if CUDA is available.
-    if [ "$FORCE_CPU" = true ]; then
-        export TORCH_DEVICE="cpu"
-        log "CPU mode enabled; forcing TORCH_DEVICE=cpu."
-        return 0
-    fi
+	# Honor CPU override even if CUDA is available.
+	if [ "$FORCE_CPU" = true ]; then
+		export TORCH_DEVICE="cpu"
+		log "CPU mode enabled; forcing TORCH_DEVICE=cpu."
+		return 0
+	fi
 
-    if has_nvidia_gpu && torch_cuda_available; then
-        cuda_available=true
-    fi
+	if has_nvidia_gpu && torch_cuda_available; then
+		cuda_available=true
+	fi
 
-    if [ "$cuda_available" = true ]; then
-        if [ -z "${TORCH_DEVICE:-}" ] || [ "$TORCH_DEVICE" = "cpu" ]; then
-            export TORCH_DEVICE="cuda"
-        fi
-        log "CUDA detected; using TORCH_DEVICE=${TORCH_DEVICE:-cuda}."
-    else
-        if [ "${TORCH_DEVICE:-}" = "cuda" ]; then
-            export TORCH_DEVICE="cpu"
-        fi
-        log "CUDA not available; using CPU."
-    fi
+	if [ "$cuda_available" = true ]; then
+		if [ -z "${TORCH_DEVICE:-}" ] || [ "$TORCH_DEVICE" = "cpu" ]; then
+			export TORCH_DEVICE="cuda"
+		fi
+		log "CUDA detected; using TORCH_DEVICE=${TORCH_DEVICE:-cuda}."
+	else
+		if [ "${TORCH_DEVICE:-}" = "cuda" ]; then
+			export TORCH_DEVICE="cpu"
+		fi
+		log "CUDA not available; using CPU."
+	fi
 }
 
 # Function to convert image links in a Markdown file to Base64-encoded images
 convert_md_to_base64() {
-    local input_file="$1" # Quote the first parameter to handle spaces
-    local output_file="${input_file%.*}.emd"
+	local input_file="$1" # Quote the first parameter to handle spaces
+	local output_file="${input_file%.*}.emd"
 
-    # Check if the input file exists
-    if [[ ! -f "$input_file" ]]; then
-        echo "Error: Input file '$input_file' not found."
-        return 1
-    fi
+	# Check if the input file exists
+	if [[ ! -f "$input_file" ]]; then
+		echo "Error: Input file '$input_file' not found."
+		return 1
+	fi
 
-    # Python script to replace image links with Base64-encoded images
-    python3 <<EOF
+	# Python script to replace image links with Base64-encoded images
+	python3 <<EOF
 import base64
+import os
 import re
 
 def replace_image_links(markdown_content):
     def base64_image(match):
-        image_path = match.group(1)
+        image_path = (match.group(1) or "").strip()
+        if not image_path:
+            return match.group(0)
+        if image_path.startswith(("http://", "https://", "data:")):
+            return match.group(0)
+        if not os.path.exists(image_path):
+            return match.group(0)
         with open(image_path, "rb") as image_file:
             encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
         return f"![](data:image/{image_path.split('.')[-1]};base64,{encoded_string})"
@@ -489,64 +525,64 @@ with open("$output_file", 'w') as file:
     file.write(new_content)
 EOF
 
-    log "Base64-encoded Markdown file created: $output_file"
+	log "Base64-encoded Markdown file created: $output_file"
 }
 
 # Function to generate a unique filename by appending a counter if the file already exists
 get_unique_filename() {
-    local filename="$1"
+	local filename="$1"
 
-    local base_name="${filename%.*}"  # Remove the last extension
-    local extension="${filename##*.}" # Get the last extension
-    local counter=1
-    local new_filename="$filename"
+	local base_name="${filename%.*}"  # Remove the last extension
+	local extension="${filename##*.}" # Get the last extension
+	local counter=1
+	local new_filename="$filename"
 
-    # Check if the file already exists
-    if [[ -e "$filename" ]]; then
-        # Extract the true basename (before the first extension)
-        local true_base_name="${filename%%.*}"
-        local remaining_ext="${filename#*.}"
+	# Check if the file already exists
+	if [[ -e "$filename" ]]; then
+		# Extract the true basename (before the first extension)
+		local true_base_name="${filename%%.*}"
+		local remaining_ext="${filename#*.}"
 
-        # Check if the true basename already contains a counter in the format (n)
-        if [[ "$true_base_name" =~ \((.*)\)$ ]]; then
-            # Extract the existing counter and increment it
-            counter=$((${BASH_REMATCH[1]} + 1))
-            true_base_name="${true_base_name%(*}" # Remove the existing counter
-        fi
+		# Check if the true basename already contains a counter in the format (n)
+		if [[ "$true_base_name" =~ \((.*)\)$ ]]; then
+			# Extract the existing counter and increment it
+			counter=$((${BASH_REMATCH[1]} + 1))
+			true_base_name="${true_base_name%(*}" # Remove the existing counter
+		fi
 
-        # Construct the new filename with the incremented counter
-        new_filename="${true_base_name}(${counter}).${remaining_ext}"
+		# Construct the new filename with the incremented counter
+		new_filename="${true_base_name}(${counter}).${remaining_ext}"
 
-        # Recursively call the function to handle cases where the new filename also exists
-        new_filename=$(get_unique_filename "$new_filename")
-    fi
+		# Recursively call the function to handle cases where the new filename also exists
+		new_filename=$(get_unique_filename "$new_filename")
+	fi
 
-    echo "$new_filename"
+	echo "$new_filename"
 }
 
 # Function to create a compressed archive of a file using tar and pxz
 parch_func() {
-    local input_file="$1"
+	local input_file="$1"
 
-    local candidate_name="$input_file.tar.xz"
-    local target_name="$(get_unique_filename "$candidate_name")"
-    local tarball_name="${target_name%.*}"
-    tar -cf "$tarball_name" -C "$(dirname "$input_file")" "$(basename "$input_file")"
-    pxz -zef "$tarball_name"
-    echo "$target_name"
+	local candidate_name="$input_file.tar.xz"
+	local target_name="$(get_unique_filename "$candidate_name")"
+	local tarball_name="${target_name%.*}"
+	tar -cf "$tarball_name" -C "$(dirname "$input_file")" "$(basename "$input_file")"
+	pxz -zef "$tarball_name"
+	echo "$target_name"
 }
 
 if [ "$DEBUG" = true ]; then
-    echo "Source PDF: $source_pdf"
-    echo "Directory: $directory"
-    echo "Split Filenames: $output_split_files"
+	echo "Source PDF: $source_pdf"
+	echo "Directory: $directory"
+	echo "Split Filenames: $output_split_files"
 fi
 
 ensure_dependency "qpdf" "qpdf"
 ensure_dependency "pxz" "pxz"
 page_count=$(qpdf --show-npages "$source_pdf" 2>/dev/null || true)
 if ! [[ "$page_count" =~ ^[0-9]+$ ]]; then
-    page_count=""
+	page_count=""
 fi
 
 #
@@ -558,7 +594,7 @@ log "Splitting '$source_no_dir' into 100-page chunks for processing by Marker"
 cd "$directory" || exit
 
 if [ "$SKIP_TO_ASSEMBLY" = false ]; then
-    run_quiet qpdf --split-pages=100 "$source_pdf" "$output_split_files"
+	run_quiet qpdf --split-pages=100 "$source_pdf" "$output_split_files"
 fi
 
 # Get the list of the resulting chunked PDF files
@@ -570,10 +606,10 @@ mapfile -t file_array < <(ls "$directory" | grep "^$start_name" | grep "$ext$" |
 
 # Display the list of chunked PDF filenames
 if [ "$DEBUG" = true ]; then
-    echo "Chunked PDF files:"
-    for i in "${!file_array[@]}"; do
-        echo "${file_array[$i]}"
-    done
+	echo "Chunked PDF files:"
+	for i in "${!file_array[@]}"; do
+		echo "${file_array[$i]}"
+	done
 fi
 
 #
@@ -581,153 +617,210 @@ fi
 # ----------------------------------------------
 
 if [ "$SKIP_TO_ASSEMBLY" = false ]; then
-    chunk_dir=$(mktemp -d)
-    for file in "${file_array[@]}"; do
-        mv -f "$directory/$file" "$chunk_dir/"
-    done
+	chunk_dir=$(mktemp -d)
+	for file in "${file_array[@]}"; do
+		mv -f "$directory/$file" "$chunk_dir/"
+	done
 
-    # Activate the virtual environment
-    cd "$MARKER_DIRECTORY" || exit
-    source "$MARKER_VENV/bin/activate"
-    install_gpu_torch_if_needed
-    configure_torch_device
+	# Activate the virtual environment
+	cd "$MARKER_DIRECTORY" || exit
+	source "$MARKER_VENV/bin/activate"
+	install_gpu_torch_if_needed
+	configure_torch_device
 
-    log "Begin processing chunks with Marker to create markdown files.  This may take a while..."
-    if [ "$SHOW_MARKER_OUTPUT" = true ]; then
-        echo "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
-    fi
+	log "Begin processing chunks with Marker to create markdown files.  This may take a while..."
+	if [ "$SHOW_MARKER_OUTPUT" = true ]; then
+		echo "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
+	fi
 
-    # Run marker once for the chunk folder to avoid per-chunk model reloads.
-    cmd="marker '$chunk_dir' --output_dir '$MARKER_RESULTS' --workers $MARKER_WORKERS"
-    marker_log="$(mktemp)"
-    if [ "$SHOW_MARKER_OUTPUT" = true ]; then
-        echo "Running Marker command: $cmd"
-        marker "$chunk_dir" --output_dir "$MARKER_RESULTS" --workers "$MARKER_WORKERS" 2>&1 | tee "$marker_log"
-        marker_status=${PIPESTATUS[0]}
-    else
-        marker "$chunk_dir" --output_dir "$MARKER_RESULTS" --workers "$MARKER_WORKERS" >"$marker_log" 2>&1
-        marker_status=$?
-    fi
-    if [ "$marker_status" -ne 0 ]; then
-        echo "Error: marker failed with exit code $marker_status." >&2
-        exit "$marker_status"
-    fi
-    # Convert failures can be logged even if marker exits 0; detect and fail fast.
-    if grep -Eq "Error converting|Traceback|OutOfMemoryError|CUDA out of memory" "$marker_log"; then
-        echo "Error: marker reported conversion failures. Re-run with -v for details." >&2
-        exit 1
-    fi
+	# Run marker once for the chunk folder to avoid per-chunk model reloads.
+	marker_extra_args=()
+	if [ "$USE_LLM" = true ]; then
+		marker_extra_args+=(--use_llm)
+	fi
+	if [ -n "$LLM_SERVICE" ]; then
+		marker_extra_args+=(--llm_service "$LLM_SERVICE")
+	fi
+	if [ "$USE_LLM" = true ] && [ "$LLM_SERVICE" = "marker.services.openai.OpenAIService" ]; then
+		if [ -n "$OPENAI_API_KEY" ] && [ "$OPENAI_API_KEY" != "..." ]; then
+			marker_extra_args+=(--openai_api_key "$OPENAI_API_KEY")
+		fi
+		if [ -n "$OPENAI_MODEL" ] && [ "$OPENAI_MODEL" != "..." ]; then
+			marker_extra_args+=(--openai_model "$OPENAI_MODEL")
+		fi
+		if [ -n "$OPENAI_BASE_URL" ] && [ "$OPENAI_BASE_URL" != "..." ]; then
+			marker_extra_args+=(--openai_base_url "$OPENAI_BASE_URL")
+		fi
+	fi
+	cmd="marker '$chunk_dir' --output_dir '$MARKER_RESULTS' --workers $MARKER_WORKERS"
+	if [ "$USE_LLM" = true ]; then
+		cmd="$cmd --use_llm"
+	fi
+	if [ -n "$LLM_SERVICE" ]; then
+		cmd="$cmd --llm_service '$LLM_SERVICE'"
+	fi
+	if [ "$USE_LLM" = true ] && [ "$LLM_SERVICE" = "marker.services.openai.OpenAIService" ]; then
+		if [ -n "$OPENAI_API_KEY" ] && [ "$OPENAI_API_KEY" != "..." ]; then
+			cmd="$cmd --openai_api_key '[redacted]'"
+		fi
+		if [ -n "$OPENAI_MODEL" ] && [ "$OPENAI_MODEL" != "..." ]; then
+			cmd="$cmd --openai_model '$OPENAI_MODEL'"
+		fi
+		if [ -n "$OPENAI_BASE_URL" ] && [ "$OPENAI_BASE_URL" != "..." ]; then
+			cmd="$cmd --openai_base_url '$OPENAI_BASE_URL'"
+		fi
+	fi
+	marker_log="$(mktemp)"
+	if [ "$SHOW_MARKER_OUTPUT" = true ]; then
+		echo "Running Marker command: $cmd"
+		(
+			marker "$chunk_dir" --output_dir "$MARKER_RESULTS" --workers "$MARKER_WORKERS" "${marker_extra_args[@]}" 2>&1 | tee "$marker_log"
+		) &
+		marker_pid=$!
+		if wait "$marker_pid"; then
+			marker_status=0
+		else
+			marker_status=$?
+		fi
+	else
+		(
+			marker "$chunk_dir" --output_dir "$MARKER_RESULTS" --workers "$MARKER_WORKERS" "${marker_extra_args[@]}" >"$marker_log" 2>&1
+		) &
+		marker_pid=$!
+		if wait "$marker_pid"; then
+			marker_status=0
+		else
+			marker_status=$?
+		fi
+	fi
+	marker_pid=""
+	if [ "$marker_status" -ne 0 ]; then
+		echo "Error: marker failed with exit code $marker_status." >&2
+		exit "$marker_status"
+	fi
+	# Convert failures can be logged even if marker exits 0; detect and fail fast.
+	if grep -Eq "Error converting|Traceback|OutOfMemoryError|CUDA out of memory" "$marker_log"; then
+		echo "Error: marker reported conversion failures. Re-run with -v for details." >&2
+		exit 1
+	fi
 
-    if [ "$SHOW_MARKER_OUTPUT" = true ]; then
-        echo "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
-    fi
-    log "Completed processing PDF chunks to turn them into markdown files"
+	if [ "$SHOW_MARKER_OUTPUT" = true ]; then
+		echo "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
+	fi
+	log "Completed processing PDF chunks to turn them into markdown files"
 fi
 
 # Iterate through the files in numerical order
 for i in "${!file_array[@]}"; do
 
-    file="${file_array[$i]}"
-    # file_path_esc=$(printf "%q" "$file_path")
-    # file_path_esc=$(printf "%q" "$file_path_esc")
-    num=$(echo "'$file'" | awk -F'_-' '{print $2}' | awk -F'-' '{print $1}')
-    log "Processing file: $file (starts with page $num)"
+	file="${file_array[$i]}"
+	# file_path_esc=$(printf "%q" "$file_path")
+	# file_path_esc=$(printf "%q" "$file_path_esc")
+	num="${file##*_-}"
+	num="${num%%-*}"
+	log "Processing file: $file; starts with page $num"
 
-    if [ "$SKIP_TO_ASSEMBLY" = false ]; then
-        # Chane to the directory where the markdown file + pictures are stored
-        file_no_ext="${file%.*}"
-        output_md_file_path="$MARKER_RESULTS/$file_no_ext"
-        cd "$output_md_file_path"
+	if [ "$SKIP_TO_ASSEMBLY" = false ]; then
+		# Chane to the directory where the markdown file + pictures are stored
+		file_no_ext="${file%.*}"
+		output_md_file_path="$MARKER_RESULTS/$file_no_ext"
+		cd "$output_md_file_path"
 
+		if [ "$DEBUG" = true ]; then
+			echo "Marker output directory: $output_md_file_path"
+		fi
 
-        if [ "$DEBUG" = true ]; then
-            echo "Marker output directory: $output_md_file_path"
-        fi
+		if [ $CONVERT_BASE64 = true ]; then
+			if [ "$DEBUG" = true ]; then
+				echo "Embeding images as Base64 into the markdown file $file_no_ext$extmd"
+			fi
 
-        if [ $CONVERT_BASE64 = true ]; then
-            if [ "$DEBUG" = true ]; then
-                echo "Embeding images as Base64 into the markdown file $file_no_ext$extmd"
-            fi
+			# Convert the image links in the markdown file into Base64-encoded images to eleminated all external dependencies
+			convert_md_to_base64 "$file_no_ext$extmd"
+			if [ "$DEBUG" = true ]; then
+				echo "Saving original version with extension .bak"
+			fi
+			mv -f "$file_no_ext$extmd" "${file_no_ext}.bak${extmd}"
+			mv -f "${file_no_ext}.emd" "$file_no_ext$extmd"
 
-            # Convert the image links in the markdown file into Base64-encoded images to eleminated all external dependencies
-            convert_md_to_base64 "$file_no_ext$extmd"
-            if [ "$DEBUG" = true ]; then
-                echo "Saving original version with extension .bak"
-            fi
-            mv -f "$file_no_ext$extmd" "${file_no_ext}.bak${extmd}"
-            mv -f "${file_no_ext}.emd" "$file_no_ext$extmd"
+			# Move the markdown file to the original directory
+			if [ "$DEBUG" = true ]; then
+				echo "Moving the markdown file to $directory"
+			fi
+			mv -f "$file_no_ext$extmd" "$directory"
+			cd "../"
+			parent_dir="$(pwd)"
 
-            # Move the markdown file to the original directory
-            if [ "$DEBUG" = true ]; then
-                echo "Moving the markdown file to $directory"
-            fi
-            mv -f "$file_no_ext$extmd" "$directory"
-            cd "../"
-            parent_dir="$(pwd)"
+			# Create a compressed archive of Marker's output directory
+			if [ "$DEBUG" = true ]; then
+				echo "Compressing and archiving the output directory $parent_dir/$file_no_ext"
+			fi
+			image_archive="$(parch_func "$file_no_ext")"
 
-            # Create a compressed archive of Marker's output directory
-            if [ "$DEBUG" = true ]; then
-                echo "Compressing and archiving the output directory $parent_dir/$file_no_ext"
-            fi
-            image_archive="$(parch_func "$file_no_ext")"
+			# Move the compressed archive(.tar.xz) to the original directory as a backup
+			if [ "$DEBUG" = true ]; then
+				echo "Moving the archive $image_archive to directory $directory"
+				echo "Removing the directory $parent_dir/$file_no_ext"
+			fi
+			mv -f "$image_archive" "$directory"
+			chunk_archives+=("$directory/$(basename "$image_archive")")
+			rm -rf "$parent_dir/$file_no_ext"
 
-            # Move the compressed archive(.tar.xz) to the original directory as a backup
-            if [ "$DEBUG" = true ]; then
-                echo "Moving the archive $image_archive to directory $directory"
-                echo "Removing the directory $parent_dir/$file_no_ext"
-            fi
-            mv -f "$image_archive" "$directory"
-            chunk_archives+=("$directory/$(basename "$image_archive")")
-            rm -rf "$parent_dir/$file_no_ext"
+		else
+			if [ "$DEBUG" = true ]; then
+				echo "Markdown File: $file_no_ext$extmd"
+			fi
 
-        else
-            if [ "$DEBUG" = true ]; then
-                echo "Markdown File: $file_no_ext$extmd"
-            fi
+			# create a 8 character hash with the markdown
+			# file name to use as a unique identifier in the attachment directory name
+			hash=$(echo "$file_no_ext" | md5sum | cut -c 1-8)
 
-            # create a 8 character hash with the markdown
-            # file name to use as a unique identifier in the attachment directory name
-            hash=$(echo "$file_no_ext" | md5sum | cut -c 1-8)
+			# determine the first 16 character of the filename without spaces or other characters
+			abbrev_fname=$(echo "$file_no_ext" | tr -d '[:punct:]' | tr -d ' ' | cut -c 1-16)
 
-            # determine the first 16 character of the filename without spaces or other characters
-            abbrev_fname=$(echo "$file_no_ext" | tr -d '[:punct:]' | tr -d ' ' | cut -c 1-16)
+			attachments_dir="attachments_${abbrev_fname}${hash}"
+			mkdir "$attachments_dir"
+			if [ "$DEBUG" = true ]; then
+				echo "Attachment directory: $attachments_dir"
+			fi
 
-            attachments_dir="attachments_${abbrev_fname}${hash}"
-            mkdir "$attachments_dir"
-            if [ "$DEBUG" = true ]; then
-                echo "Attachment directory: $attachments_dir"
-            fi
+			# temporarily move the markdown file to a temp directory
+			temp_md_dir=$(mktemp -d)
+			mv -f "$file_no_ext$extmd" "$temp_md_dir"
 
-            # temporarily move the markdown file to a temp directory
-            temp_md_dir=$(mktemp -d)
-            mv -f "$file_no_ext$extmd" "$temp_md_dir"
+			# move all remaining files to the attachments directory
+			shopt -s dotglob nullglob
+			for asset in *; do
+				if [ "$asset" = "$attachments_dir" ]; then
+					continue
+				fi
+				mv -f "$asset" "$attachments_dir/"
+			done
+			shopt -u dotglob nullglob
 
-            # move all remaining files to the attachments directory
-            mv -f * "$attachments_dir/"
+			# move the markdown file back to the Marker output directory
+			mv -f "$temp_md_dir/$file_no_ext$extmd" "$output_md_file_path"
+			# delete temp directory
+			rm -fr "$temp_md_dir"
 
-            # move the markdown file back to the Marker output directory
-            mv -f "$temp_md_dir/$file_no_ext$extmd" "$output_md_file_path"
-            # delete temp directory
-            rm -fr "$temp_md_dir"
+			# change all links in the markdown file to point to the attachments directory
+			sed -i "s|!\[\(.*\)\](\(.*\))|![\1]($attachments_dir/\2)|g" "$file_no_ext$extmd"
 
-            # change all links in the markdown file to point to the attachments directory
-            sed -i "s|!\[\(.*\)\](\(.*\))|![\1]($attachments_dir/\2)|g" "$file_no_ext$extmd"
+			# move the markdown file to the original directory where the PDF file is located
+			if [ "$DEBUG" = true ]; then
+				echo "Moving the markdown file to $directory"
+			fi
+			mv -f "$file_no_ext$extmd" "$directory"
 
-            # move the markdown file to the original directory where the PDF file is located
-            if [ "$DEBUG" = true ]; then
-                echo "Moving the markdown file to $directory"
-            fi
-            mv -f "$file_no_ext$extmd" "$directory"
+			# move the attachments directory to the original directory where the PDF file is located
+			if [ "$DEBUG" = true ]; then
+				echo "Moving the attachments directory to $directory"
+			fi
+			mv -f "$attachments_dir" "$directory"
+			attachments_dirs+=("$attachments_dir")
 
-            # move the attachments directory to the original directory where the PDF file is located
-            if [ "$DEBUG" = true ]; then
-                echo "Moving the attachments directory to $directory"
-            fi
-            mv -f "$attachments_dir" "$directory"
-            attachments_dirs+=("$attachments_dir")
-
-        fi
-    fi
+		fi
+	fi
 
 done
 
@@ -744,10 +837,10 @@ mapfile -t file_array_md < <(ls "$directory" | grep "^$start_name" | grep "$extm
 
 # Display the list of chunked MD files
 if [ "$DEBUG" = true ]; then
-    for i in "${!file_array_md[@]}"; do
-        #     file_array_q[$i]="'${file_array[$i]}'"
-        echo "${file_array_md[$i]}"
-    done
+	for i in "${!file_array_md[@]}"; do
+		#     file_array_q[$i]="'${file_array[$i]}'"
+		echo "${file_array_md[$i]}"
+	done
 fi
 
 # Iteratively use 'cat' to append the contents of the MD chunks into the consolidated MD output file
@@ -757,37 +850,37 @@ temp_merge_dir="$temp_dir"
 touch "$consolidated_md_file"
 for i in "${!file_array_md[@]}"; do
 
-    file="${file_array_md[$i]}"
-    file_path="$directory/$file"
-    if [ "$DEBUG" = true ]; then
-        num=$(echo "'$file'" | awk -F'_-' '{print $2}' | awk -F'-' '{print $1}')
-        echo "Processing file: $file (starts with page $num)"
-    fi
-    cat "$file_path" >>"$consolidated_md_file"
-    echo "" >>"$consolidated_md_file"
+	file="${file_array_md[$i]}"
+	file_path="$directory/$file"
+	if [ "$DEBUG" = true ]; then
+		num=$(echo "'$file'" | awk -F'_-' '{print $2}' | awk -F'-' '{print $1}')
+		echo "Processing file: $file (starts with page $num)"
+	fi
+	cat "$file_path" >>"$consolidated_md_file"
+	echo "" >>"$consolidated_md_file"
 
-    # move the consolidated markdown archive to the temp directory
-    if [ $CONVERT_BASE64 = true ]; then
-        mv -f "$file_path" "$temp_dir"
-        archive_file="${file_path%.*}.tar.xz"
-        mv -f "$archive_file" "$temp_dir"
-    else
-        rm -f "$file_path"
-    fi
+	# move the consolidated markdown archive to the temp directory
+	if [ $CONVERT_BASE64 = true ]; then
+		mv -f "$file_path" "$temp_dir"
+		archive_file="${file_path%.*}.tar.xz"
+		mv -f "$archive_file" "$temp_dir"
+	else
+		rm -f "$file_path"
+	fi
 done
 
 # Create a compressed archive of the consolidated markdown archives
 full_archive=""
 if [ $CONVERT_BASE64 = true ]; then
-    full_archive_dir="${temp_dir%/*}"
-    cd "$full_archive_dir" || exit
-    full_archive="$(parch_func "$temp_dir")"
-    mv -f "$full_archive" "$directory"
-    rm -rf "$temp_dir"
-    temp_merge_dir=""
+	full_archive_dir="${temp_dir%/*}"
+	cd "$full_archive_dir" || exit
+	full_archive="$(parch_func "$temp_dir")"
+	mv -f "$full_archive" "$directory"
+	rm -rf "$temp_dir"
+	temp_merge_dir=""
 else
-    rm -rf "$temp_dir"
-    temp_merge_dir=""
+	rm -rf "$temp_dir"
+	temp_merge_dir=""
 fi
 cd "$directory" || exit
 
@@ -798,33 +891,33 @@ cd "$directory" || exit
 bundle_archive=""
 bundle_archive_created=false
 if [ "$CONVERT_BASE64" = false ]; then
-    # Collect attachment directories referenced in the consolidated markdown file.
-    if [ -f "$consolidated_md_file" ]; then
-        mapfile -t attachment_refs < <(grep -o 'attachments_[^)/]*' "$consolidated_md_file" | sort -u)
-        if [ "${#attachment_refs[@]}" -gt 0 ]; then
-            mapfile -t attachments_dirs < <(printf '%s\n' "${attachments_dirs[@]}" "${attachment_refs[@]}" | sort -u)
-        fi
-    fi
+	# Collect attachment directories referenced in the consolidated markdown file.
+	if [ -f "$consolidated_md_file" ]; then
+		mapfile -t attachment_refs < <(grep -o 'attachments_[^)/]*' "$consolidated_md_file" | sort -u)
+		if [ "${#attachment_refs[@]}" -gt 0 ]; then
+			mapfile -t attachments_dirs < <(printf '%s\n' "${attachments_dirs[@]}" "${attachment_refs[@]}" | sort -u)
+		fi
+	fi
 
-    filtered_dirs=()
-    for dir in "${attachments_dirs[@]}"; do
-        if [ -d "$directory/$dir" ]; then
-            filtered_dirs+=("$dir")
-        fi
-    done
-    attachments_dirs=("${filtered_dirs[@]}")
-    unset filtered_dirs
+	filtered_dirs=()
+	for dir in "${attachments_dirs[@]}"; do
+		if [ -d "$directory/$dir" ]; then
+			filtered_dirs+=("$dir")
+		fi
+	done
+	attachments_dirs=("${filtered_dirs[@]}")
+	unset filtered_dirs
 
-    # Bundle attachments only when images are not embedded.
-    if [ "${#attachments_dirs[@]}" -gt 0 ]; then
-        bundle_candidate="$directory/${source_stem}_bundle.tar.xz"
-        bundle_target="$(get_unique_filename "$bundle_candidate")"
-        bundle_tar="${bundle_target%.*}"
-        tar -cf "$bundle_tar" -C "$directory" "${attachments_dirs[@]}"
-        pxz -zef "$bundle_tar"
-        bundle_archive="$bundle_target"
-        bundle_archive_created=true
-    fi
+	# Bundle attachments only when images are not embedded.
+	if [ "${#attachments_dirs[@]}" -gt 0 ]; then
+		bundle_candidate="$directory/${source_stem}_bundle.tar.xz"
+		bundle_target="$(get_unique_filename "$bundle_candidate")"
+		bundle_tar="${bundle_target%.*}"
+		tar -cf "$bundle_tar" -C "$directory" "${attachments_dirs[@]}"
+		pxz -zef "$bundle_tar"
+		bundle_archive="$bundle_target"
+		bundle_archive_created=true
+	fi
 fi
 
 #
@@ -833,14 +926,14 @@ fi
 
 # Delete the split PDF files
 if [ -n "$chunk_dir" ] && [ -d "$chunk_dir" ]; then
-    rm -rf "$chunk_dir"
-    chunk_dir=""
+	rm -rf "$chunk_dir"
+	chunk_dir=""
 else
-    for i in "${!file_array[@]}"; do
-        file="${file_array[$i]}"
-        file_path="$directory/$file"
-        rm -f "$file_path"
-    done
+	for i in "${!file_array[@]}"; do
+		file="${file_array[$i]}"
+		file_path="$directory/$file"
+		rm -f "$file_path"
+	done
 fi
 
 log "Completed merging markdown files into $consolidated_md_name"
@@ -852,45 +945,45 @@ log "Completed merging markdown files into $consolidated_md_name"
 md_target="$start_directory/$consolidated_md_name"
 bundle_archive_name=""
 if [ -n "$bundle_archive" ]; then
-    bundle_archive_name="$(basename "$bundle_archive")"
+	bundle_archive_name="$(basename "$bundle_archive")"
 fi
 
 if [ "$directory" != "$start_directory" ]; then
-    mv -f "$consolidated_md_file" "$md_target"
-    if [ -n "$bundle_archive" ] && [ -f "$bundle_archive" ]; then
-        mv -f "$bundle_archive" "$start_directory"
-    fi
+	mv -f "$consolidated_md_file" "$md_target"
+	if [ -n "$bundle_archive" ] && [ -f "$bundle_archive" ]; then
+		mv -f "$bundle_archive" "$start_directory"
+	fi
 else
-    md_target="$consolidated_md_file"
+	md_target="$consolidated_md_file"
 fi
 
 if [ "${#attachments_dirs[@]}" -gt 0 ]; then
-    if [ "$bundle_archive_created" = true ]; then
-        for dir in "${attachments_dirs[@]}"; do
-            rm -rf "$directory/$dir"
-        done
-    elif [ "$directory" != "$start_directory" ]; then
-        for dir in "${attachments_dirs[@]}"; do
-            if [ -d "$directory/$dir" ]; then
-                mv -f "$directory/$dir" "$start_directory"
-            fi
-        done
-    fi
+	if [ "$bundle_archive_created" = true ]; then
+		for dir in "${attachments_dirs[@]}"; do
+			rm -rf "$directory/$dir"
+		done
+	elif [ "$directory" != "$start_directory" ]; then
+		for dir in "${attachments_dirs[@]}"; do
+			if [ -d "$directory/$dir" ]; then
+				mv -f "$directory/$dir" "$start_directory"
+			fi
+		done
+	fi
 fi
 
 if [ "${#chunk_archives[@]}" -gt 0 ]; then
-    for archive in "${chunk_archives[@]}"; do
-        if [ -f "$archive" ]; then
-            rm -f "$archive"
-        fi
-    done
+	for archive in "${chunk_archives[@]}"; do
+		if [ -f "$archive" ]; then
+			rm -f "$archive"
+		fi
+	done
 fi
 
 if [ -n "$full_archive" ]; then
-    full_archive_path="$directory/$(basename "$full_archive")"
-    if [ -f "$full_archive_path" ]; then
-        rm -f "$full_archive_path"
-    fi
+	full_archive_path="$directory/$(basename "$full_archive")"
+	if [ -f "$full_archive_path" ]; then
+		rm -f "$full_archive_path"
+	fi
 fi
 
 # Deactivate the virtual environment and return to the directory which was the current directory when the script started
@@ -898,22 +991,22 @@ deactivate
 cd "$start_directory" || exit
 echo "Output markdown: $(basename "$md_target")"
 if [ "$bundle_archive_created" = true ]; then
-    if [ -n "$bundle_archive_name" ] && [ -f "$bundle_archive_name" ]; then
-        echo "Output archive: $bundle_archive_name"
-        echo "Note: Extract the archive in this directory for images to display properly."
-    else
-        echo "Warning: Attachment archive was created but is not in the current directory."
-    fi
+	if [ -n "$bundle_archive_name" ] && [ -f "$bundle_archive_name" ]; then
+		echo "Output archive: $bundle_archive_name"
+		echo "Note: Extract the archive in this directory for images to display properly."
+	else
+		echo "Warning: Attachment archive was created but is not in the current directory."
+	fi
 fi
 end_time=$(date +%s)
 elapsed_seconds=$((end_time - start_time))
 elapsed_formatted=$(format_duration "$elapsed_seconds")
 echo "Total time: $elapsed_formatted"
 if [ -n "$page_count" ]; then
-    per_page_seconds=$(awk -v total="$elapsed_seconds" -v pages="$page_count" 'BEGIN { if (pages > 0) printf "%.2f", total / pages; else print "" }')
-    if [ -n "$per_page_seconds" ]; then
-        echo "Time per page: ${per_page_seconds}s"
-    fi
+	per_page_seconds=$(awk -v total="$elapsed_seconds" -v pages="$page_count" 'BEGIN { if (pages > 0) printf "%.2f", total / pages; else print "" }')
+	if [ -n "$per_page_seconds" ]; then
+		echo "Time per page: ${per_page_seconds}s"
+	fi
 fi
 echo "Script completed."
 
