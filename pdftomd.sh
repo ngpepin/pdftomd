@@ -11,12 +11,12 @@
 set -eE -o pipefail
 
 #####
-# Convert a PDF into markdown using Marker (https://github.com/VikParuchuri/marker?tab=readme-ov-file)
+# PDF to Markdown wrapper for Marker (https://github.com/VikParuchuri/marker)
 #
-# - Splits the input PDF into 100-page chunks, processes each chunk with Marker, and then merges the resulting markdown files into one.
-# - The script assumes that Marker is installed in the directory specified by the MARKER_DIRECTORY variable.
-# - The script uses qpdf to split the PDF into chunks and Marker to convert the chunks to markdown.
-# - Marker is written in Python 3.10+ and uses PyTorch.
+# - Splits the input PDF into 100-page chunks, runs Marker once on the chunk folder,
+#   and merges the resulting markdown into a single output file.
+# - Supports optional OCR pre-pass via ocr-pdf.sh and optional LLM helper mode via Marker.
+# - Moves the final markdown to the directory where the script was invoked.
 #
 # Usage:
 #
@@ -37,11 +37,11 @@ set -eE -o pipefail
 #
 # Dependencies:
 #
-#  qpdf, pxz, marker (python instalation), ocr-pdf.sh (OCR_PDF repo for -o/--ocr)
+#  qpdf, pxz, marker (Python installation), ocr-pdf.sh (OCR_PDF repo for -o/--ocr)
 #
-#
-#  Initial ersions: CPU-only
-#
+# Notes:
+#  - Default is GPU if available (auto-installs CUDA-enabled torch when needed).
+#  - Default MARKER_WORKERS=1; adjust with -w when VRAM allows.
 #####
 
 # Set the following variables to control the behavior of the script
@@ -75,6 +75,7 @@ fi
 # DO NOT MODIFY BELOW THIS LINE
 # ----------------------------------------------
 
+# Print CLI usage and options.
 print_usage() {
 	cat <<EOF
 Usage: pdftomd.sh [options] <pdf_file>
@@ -216,9 +217,9 @@ else
 fi
 
 if [ "$USE_OCR" = true ]; then
-	echo "Running OCR on $(basename "$source_pdf")"
+	echo "Running external EasyOCR script on $(basename "$source_pdf")"
 	if [ ! -x "$OCR_SCRIPT" ]; then
-		echo "Error: OCR script not found or not executable: $OCR_SCRIPT" >&2
+		echo "Error: EasyOCR script not found or not executable: $OCR_SCRIPT" >&2
 		exit 1
 	fi
 	source_base="$(basename "$source_pdf")"
@@ -265,12 +266,14 @@ marker_log=""
 # FUNCTIONS
 # ----------------------------------------------
 
+# Log only when verbose mode is enabled.
 log() {
 	if [ "$VERBOSE" = true ]; then
 		echo "$@"
 	fi
 }
 
+# Format seconds as HH:MM:SS.
 format_duration() {
 	local total_seconds="$1"
 	local hours=$((total_seconds / 3600))
@@ -279,6 +282,7 @@ format_duration() {
 	printf "%02d:%02d:%02d" "$hours" "$minutes" "$seconds"
 }
 
+# Trap handler for unexpected errors.
 on_error() {
 	local exit_code=$?
 	local line_no="$1"
@@ -287,6 +291,7 @@ on_error() {
 	exit "$exit_code"
 }
 
+# Cleanup temp dirs and terminate marker subprocesses.
 cleanup_temp() {
 	# Ensure marker subprocesses are stopped before removing temp directories.
 	if [ -n "$marker_pid" ] && kill -0 "$marker_pid" 2>/dev/null; then
@@ -322,6 +327,7 @@ cleanup_temp() {
 trap 'on_error $LINENO' ERR
 trap cleanup_temp INT TERM EXIT
 
+# Run a command quietly unless verbose is enabled.
 run_quiet() {
 	if [ "$VERBOSE" = true ]; then
 		"$@"
@@ -330,6 +336,7 @@ run_quiet() {
 	fi
 }
 
+# Ensure a command exists, installing via apt-get if missing.
 ensure_dependency() {
 	local command_name="$1"
 	local package_name="$2"
@@ -356,6 +363,7 @@ ensure_dependency() {
 	fi
 }
 
+# Detect NVIDIA GPU presence via nvidia-smi or device nodes.
 has_nvidia_gpu() {
 	if command -v nvidia-smi >/dev/null 2>&1; then
 		if nvidia-smi -L >/dev/null 2>&1; then
@@ -370,6 +378,7 @@ has_nvidia_gpu() {
 	return 1
 }
 
+# Extract CUDA version from nvidia-smi output.
 get_cuda_version_from_nvidia_smi() {
 	if ! command -v nvidia-smi >/dev/null 2>&1; then
 		return 1
@@ -384,6 +393,7 @@ get_cuda_version_from_nvidia_smi() {
     '
 }
 
+# Map CUDA major version to a torch wheel tag.
 map_cuda_version_to_torch_tag() {
 	local cuda_version="$1"
 	local major="${cuda_version%%.*}"
@@ -401,6 +411,7 @@ map_cuda_version_to_torch_tag() {
 	echo ""
 }
 
+# Check whether torch.cuda.is_available() returns true.
 torch_cuda_available() {
 	python3 <<'PY' >/dev/null 2>&1
 import sys
@@ -412,6 +423,7 @@ except Exception:
 PY
 }
 
+# Install CUDA-enabled torch if a GPU is present and CUDA is available.
 install_gpu_torch_if_needed() {
 	local cuda_version=""
 	local torch_cuda_tag=""
@@ -456,6 +468,7 @@ install_gpu_torch_if_needed() {
 	fi
 }
 
+# Set TORCH_DEVICE based on GPU availability and overrides.
 configure_torch_device() {
 	local cuda_available=false
 
@@ -484,6 +497,7 @@ configure_torch_device() {
 }
 
 # Function to convert image links in a Markdown file to Base64-encoded images
+# Replace local image links in markdown with Base64 data URIs.
 convert_md_to_base64() {
 	local input_file="$1" # Quote the first parameter to handle spaces
 	local output_file="${input_file%.*}.emd"
@@ -529,6 +543,7 @@ EOF
 }
 
 # Function to generate a unique filename by appending a counter if the file already exists
+# Create a unique filename by appending (n) when needed.
 get_unique_filename() {
 	local filename="$1"
 
@@ -561,6 +576,7 @@ get_unique_filename() {
 }
 
 # Function to create a compressed archive of a file using tar and pxz
+# Create a tar.xz archive from a file or directory.
 parch_func() {
 	local input_file="$1"
 
