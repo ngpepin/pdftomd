@@ -12,6 +12,27 @@
 - Automatically uses GPU when available and installs CUDA-enabled torch when needed.
 - Cleans up intermediate files and attempts to stop spawned processes on exit.
 
+## Using `pdftomd.sh` in a RAG pipeline
+
+Run `pdftomd.sh` as the ingestion step that turns source PDFs into markdown your splitter and embedder can consume. A typical flow is:
+
+1. (Optional) OCR the PDF with `-o` for scanned documents.
+2. Convert to a single consolidated markdown file (and optionally embed images with `-e`).
+3. Feed the markdown into your chunker, add metadata (file name, page ranges), then index.
+
+Example ingestion command:
+
+```shell
+./pdftomd.sh -e -o /path/to/source.pdf
+```
+
+Benefits over calling Marker directly:
+
+- Handles large documents via chunking while keeping a single output file, which simplifies downstream chunking and metadata.
+- Avoids repeated model loads by running Marker once across all chunks, improving throughput for big PDFs.
+- Keeps assets self-contained with Base64 embedding or a single attachment bundle, reducing file management for ingestion jobs.
+- Provides operational glue (GPU detection, torch install, cleanup on exit, consistent output location) so pipeline orchestration is simpler.
+
 ## Quick start
 
 ```shell
@@ -87,30 +108,21 @@ These steps keep the local `pdftomd.sh` customizations intact while pulling upst
 
 # Appendix: About Marker
 
-see https://github.com/datalab-to/marker for up-to-date writeup on Marker.  The following brief backgrounder may be out of date.
+Marker converts documents to markdown, JSON, and HTML with a focus on speed and layout fidelity.
 
-Marker converts documents to markdown, JSON, and HTML quickly and accurately.
-
-- Converts PDF, image, PPTX, DOCX, XLSX, HTML, EPUB files in all languages
-- Formats tables, forms, equations, inline math, links, references, and code blocks
-- Extracts and saves images
-- Removes headers/footers/other artifacts
-- Extensible with your own formatting and logic
-- Optionally boost accuracy with LLMs
-- Works on GPU, CPU, or MPS
+- Supports PDFs plus common office and web formats (PPTX, DOCX, XLSX, HTML, EPUB, images)
+- Preserves structure for tables, forms, equations, inline math, links, references, and code blocks
+- Extracts images and reduces layout artifacts like headers and footers
+- Extensible with custom formatting and post-processing logic
+- Optional LLM-assisted mode for higher accuracy on complex layouts
+- Runs on GPU, CPU, or MPS with batch-friendly processing
 
 ## Performance
 
-Marker benchmarks favorably compared to cloud services like Llamaparse and Mathpix, as well as other open source tools.
+Marker is designed for high throughput and strong accuracy. Reported benchmarks show it outperforming many hosted services and other open source tools.
 
-The above results are running single PDF pages serially.  Marker is significantly faster when running in batch mode, with a projected throughput of 122 pages/second on an H100 (.18 seconds per page across 22 processes).
-
-See [below](#benchmarks) for detailed speed and accuracy benchmarks, and instructions on how to run your own benchmarks.
+Batch runs are substantially faster than single-page serial processing, with a reported peak throughput around 122 pages per second on an H100 (about 0.18 seconds per page across 22 processes).
 
 ## Hybrid Mode
 
-For the highest accuracy, pass the `--use_llm` flag to use an LLM alongside marker.  This will do things like merge tables across pages, handle inline math, format tables properly, and extract values from forms.  It can use any gemini or ollama model.  By default, it uses `gemini-2.0-flash`.  See [below](#llm-services) for details.
-
-Here is a table benchmark comparing marker, gemini flash alone, and marker with use_llm:
-
-As you can see, the use_llm mode offers higher accuracy than marker or gemini alone.
+For the highest accuracy, pass the `--use_llm` flag to combine Marker with an LLM. This improves table structure, multi-page table merging, inline math, and form value extraction.
