@@ -1,6 +1,6 @@
 # PDF to Markdown Wrapper (pdftomd.sh)
 
-`pdftomd.sh` is a convenience wrapper around Marker that converts a PDF into a single markdown file. It handles chunking, optional image embedding, GPU selection, and consolidates output in the directory where you run the script.
+`pdftomd.sh`is a RAG workflow-friendly enhancement of Marker that converts a PDF into a single markdown file. It handles GPU and PyTorch configuration, document splitting and chunking, image BASE64 embedding, and consolidation of output.
 
 ## Why use the wrapper
 
